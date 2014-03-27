@@ -54,47 +54,54 @@ func NewAPI() *API {
 	return &API{}
 }
 
-func (api *API) requestHandler(resource interface{}) http.HandlerFunc {
+func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.HandlerFunc {
 	return func(rw http.ResponseWriter, request *http.Request) {
-
 		if request.ParseForm() != nil {
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		var handler func(url.Values) (int, interface{})
+		handler, values := endpoint.FindRoute(request.URL.Path)
 
-		switch request.Method {
-		case GET:
-			if resource, ok := resource.(GetSupported); ok {
-				handler = resource.Get
-			}
-		case POST:
-			if resource, ok := resource.(PostSupported); ok {
-				handler = resource.Post
-			}
-		case PUT:
-			if resource, ok := resource.(PutSupported); ok {
-				handler = resource.Put
-			}
-		case DELETE:
-			if resource, ok := resource.(DeleteSupported); ok {
-				handler = resource.Delete
-			}
-		}
+//		var handler func(url.Values) (int, interface{})
+//
+//		switch request.Method {
+//		case GET:
+//			if resource, ok := resource.(GetSupported); ok {
+//				handler = resource.Get
+//			}
+//		case POST:
+//			if resource, ok := resource.(PostSupported); ok {
+//				handler = resource.Post
+//			}
+//		case PUT:
+//			if resource, ok := resource.(PutSupported); ok {
+//				handler = resource.Put
+//			}
+//		case DELETE:
+//			if resource, ok := resource.(DeleteSupported); ok {
+//				handler = resource.Delete
+//			}
+//		}
 
 		if handler == nil {
 			rw.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 
-		code, data := handler(request.Form)
+		params := request.Form
+		for k, v := range values {
+		    params[k] = v
+		}
+
+		code, data := handler(params)
 
 		content, err := json.Marshal(data)
 		if err != nil {
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(code)
 		rw.Write(content)
 	}
@@ -103,13 +110,18 @@ func (api *API) requestHandler(resource interface{}) http.HandlerFunc {
 // AddResource adds a new resource to an API. The API will route
 // requests that match one of the given paths to the matching HTTP
 // method on the resource.
-func (api *API) AddResource(resource interface{}, paths ...string) {
+func (api *API) AddResource(resource interface{}, path string) {
 	if api.mux == nil {
 		api.mux = http.NewServeMux()
 	}
-	for _, path := range paths {
-		api.mux.HandleFunc(path, api.requestHandler(resource))
+	
+	endpoint := Endpoint{ Root: path }
+	if resource, ok := resource.(GetSupported); ok {
+	    route := NewRoute(path, resource.Get)
+	    endpoint.AddRoute(route)
 	}
+	
+	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, endpoint))
 }
 
 // Start causes the API to begin serving requests on the given port.
@@ -118,5 +130,7 @@ func (api *API) Start(port int) error {
 		return errors.New("You must add at least one resource to this API.")
 	}
 	portString := fmt.Sprintf(":%d", port)
+	fmt.Printf("Running server on port %d\n", port)
 	return http.ListenAndServe(portString, api.mux)
 }
+
