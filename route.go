@@ -13,43 +13,69 @@ type Endpoint struct {
 }
 
 func (endpoint *Endpoint) AddRoute(route Route) {
-    if(endpoint.Routes == nil) {
-        fmt.Printf("Initializing routes array\n")
+    if(len(endpoint.Routes) == 0) {
         endpoint.Routes = make([]Route, 0)
     }
-    fmt.Printf("Appending %v to %v\n", endpoint.Routes, route)
+    fmt.Printf("%s %s\n", route.Path, route.Method)
     endpoint.Routes = append(endpoint.Routes, route)
-    fmt.Printf("Routes %v\n", endpoint.Routes)
 }
 
-func (endpoint Endpoint) FindRoute(path string) (func(url.Values) (int, interface{}), url.Values) {
+func (endpoint Endpoint) FindRoute(path string, method string) (*Route, url.Values) {
     matchPath := path
     if strings.HasSuffix(matchPath, "/") {
         matchPath = matchPath[:len(matchPath) - 1]
     }
-    fmt.Printf("Finding route to %s\n", matchPath)
-    fmt.Printf("%v\n", endpoint.Routes)
     for _, route := range endpoint.Routes {
-        values, ok := route.Match(matchPath)
-        fmt.Printf("Got %v---%v", values, ok)
-        if ok {
-            return route.Handler, values
+        if route.Method == method {
+            values, ok := route.Match(matchPath)
+            if ok {
+                return &route, values
+            }
         }
     }
     return nil, nil
 }
 
 type Route struct {
-  Path          string
-  PathRegexp    *regexp.Regexp
-  Handler       func(url.Values) (int, interface{})
+  Path              string
+  Method            string
+  PathRegexp        *regexp.Regexp
+  RetrieveHandler   RestRetrieveHandler
+  SaveHandler       RestSaveHandler
+  DeleteHandler     RestDeleteHandler
 }
 
-func NewRoute(path string, handler func(url.Values) (int, interface{})) Route {
+type RestRetrieveHandler func(url.Values) (int, interface{})
+func NewRetrieveRoute(path string, method string, handler RestRetrieveHandler) Route {
   route := Route{
-    Path:       path,
-    Handler:    handler,
-    PathRegexp: regexp.MustCompile(pathToRegexpString(path)),
+    Path:           path,
+    Method:         method,
+    PathRegexp:     regexp.MustCompile(pathToRegexpString(path)),
+    RetrieveHandler: handler,
+  }
+
+  return route
+}
+
+type RestSaveHandler func(*interface{}, url.Values) (int, interface{})
+func NewSaveRoute(path string, method string, handler RestSaveHandler) Route {
+  route := Route{
+    Path:           path,
+    Method:         method,
+    PathRegexp:     regexp.MustCompile(pathToRegexpString(path)),
+    SaveHandler:    handler,
+  }
+
+  return route
+}
+
+type RestDeleteHandler func(url.Values) (int)
+func NewDeleteRoute(path string, method string, handler RestDeleteHandler) Route {
+  route := Route{
+    Path:           path,
+    Method:         method,
+    PathRegexp:     regexp.MustCompile(pathToRegexpString(path)),
+    DeleteHandler:  handler,
   }
 
   return route

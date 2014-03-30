@@ -15,6 +15,10 @@ const (
 	DELETE = "DELETE"
 )
 
+type ListSupported interface {
+    List(url.Values) (int, interface{})
+}
+
 // GetSupported is the interface that provides the Get
 // method a resource must support to receive HTTP GETs.
 type GetSupported interface {
@@ -24,19 +28,23 @@ type GetSupported interface {
 // PostSupported is the interface that provides the Post
 // method a resource must support to receive HTTP POSTs.
 type PostSupported interface {
-	Post(url.Values) (int, interface{})
+	Post(*interface{}, url.Values) (int, interface{})
 }
 
 // PutSupported is the interface that provides the Put
 // method a resource must support to receive HTTP PUTs.
 type PutSupported interface {
-	Put(url.Values) (int, interface{})
+	Put(*interface{}, url.Values) (int, interface{})
 }
 
 // DeleteSupported is the interface that provides the Delete
 // method a resource must support to receive HTTP DELETEs.
 type DeleteSupported interface {
-	Delete(url.Values) (int, interface{})
+	Delete(url.Values) (int)
+}
+
+type Restful interface {
+    GetResource() (interface{})
 }
 
 // An API manages a group of resources by routing requests
@@ -60,31 +68,9 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
-
-		handler, values := endpoint.FindRoute(request.URL.Path)
-
-//		var handler func(url.Values) (int, interface{})
-//
-//		switch request.Method {
-//		case GET:
-//			if resource, ok := resource.(GetSupported); ok {
-//				handler = resource.Get
-//			}
-//		case POST:
-//			if resource, ok := resource.(PostSupported); ok {
-//				handler = resource.Post
-//			}
-//		case PUT:
-//			if resource, ok := resource.(PutSupported); ok {
-//				handler = resource.Put
-//			}
-//		case DELETE:
-//			if resource, ok := resource.(DeleteSupported); ok {
-//				handler = resource.Delete
-//			}
-//		}
-
-		if handler == nil {
+        
+		route, values := endpoint.FindRoute(request.URL.Path, request.Method)
+		if route == nil || values == nil {
 			rw.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -94,7 +80,30 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 		    params[k] = v
 		}
 
-		code, data := handler(params)
+        var code int
+        var data interface{}
+        if request.Method == GET {
+		    code, data = route.RetrieveHandler(params)
+		} else if request.Method == POST || request.Method == PUT {
+		    var resourceProxy interface{}
+            if resource, ok := resource.(Restful); ok {
+                resourceProxy = resource.GetResource()
+            }
+            if resourceProxy == nil {
+                rw.WriteHeader(http.StatusMethodNotAllowed)
+                return
+            }
+            decoder := json.NewDecoder(request.Body)
+
+            err := decoder.Decode(&resourceProxy)
+            if err != nil {
+                rw.WriteHeader(http.StatusInternalServerError)
+                return
+            }
+            code, data = route.SaveHandler(&resourceProxy, params)
+		} else if request.Method == DELETE {
+            code = route.DeleteHandler(params)
+		}
 
 		content, err := json.Marshal(data)
 		if err != nil {
@@ -115,13 +124,36 @@ func (api *API) AddResource(resource interface{}, path string) {
 		api.mux = http.NewServeMux()
 	}
 	
-	endpoint := Endpoint{ Root: path }
+	rootEndpoint := Endpoint{ Root: path }
+	nestedEndpoint := Endpoint{ Root: path }
+
+	if resource, ok := resource.(ListSupported); ok {
+        route := NewRetrieveRoute(path, GET, resource.List)
+        rootEndpoint.AddRoute(route)
+	}
+
 	if resource, ok := resource.(GetSupported); ok {
-	    route := NewRoute(path, resource.Get)
-	    endpoint.AddRoute(route)
+	    route := NewRetrieveRoute(fmt.Sprintf("%s/:id", path), GET, resource.Get)
+	    nestedEndpoint.AddRoute(route)
+	}
+
+	if resource, ok := resource.(PostSupported); ok {
+        route := NewSaveRoute(fmt.Sprintf("%s/:id", path), POST, resource.Post)
+        nestedEndpoint.AddRoute(route)
+	}
+
+	if resource, ok := resource.(PutSupported); ok {
+        route := NewSaveRoute(fmt.Sprintf("%s/:id", path), PUT, resource.Put)
+        nestedEndpoint.AddRoute(route)
+	}
+
+	if resource, ok := resource.(DeleteSupported); ok {
+	    route := NewDeleteRoute(fmt.Sprintf("%s/:id", path), DELETE, resource.Delete)
+	    nestedEndpoint.AddRoute(route)
 	}
 	
-	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, endpoint))
+	api.mux.HandleFunc(path, api.requestHandler(resource, rootEndpoint))
+	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, nestedEndpoint))
 }
 
 // Start causes the API to begin serving requests on the given port.
