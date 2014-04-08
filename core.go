@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 )
 
 const (
@@ -69,6 +70,11 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 			return
 		}
 
+		path := request.URL.Path
+		if path[len(path)-1] == '/' {
+			fmt.Printf("%s %d\n", path, len(path))
+			path = path[:len(path)-2]
+		}
 		route, values := endpoint.FindRoute(request.URL.Path, request.Method)
 		if route == nil || values == nil {
 			rw.WriteHeader(http.StatusMethodNotAllowed)
@@ -83,7 +89,17 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 		var code int
 		var data interface{}
 		if request.Method == GET {
-			code, data = route.RetrieveHandler(params)
+			methodName := "Get"
+			if len(values) == 0 {
+				methodName = "List"
+			}
+			fmt.Printf("meth: %s\n", methodName)
+			inputs := make([]reflect.Value, 1)
+			inputs[0] = reflect.ValueOf(params)
+			codeData := reflect.ValueOf(resource).MethodByName(methodName).Call(inputs)
+			r := codeData[1]
+			code = int(codeData[0].Int())
+			data = reflect.Value(r).Interface()
 		} else if request.Method == POST || request.Method == PUT {
 			var resourceProxy interface{}
 			if resource, ok := resource.(Restful); ok {
@@ -106,7 +122,16 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 				http.Error(rw, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			code, data = route.SaveHandler(&resourceProxy, params)
+
+			if request.Method == POST {
+				inputs := make([]reflect.Value, 2)
+				inputs[0] = reflect.ValueOf(resourceProxy)
+				inputs[1] = reflect.ValueOf(params)
+				codeData := reflect.ValueOf(resource).MethodByName("Post").Call(inputs)
+				code = int(codeData[0].Int())
+				data = reflect.Value(codeData[1]).Interface()
+			}
+			//code, data = route.SaveHandler(&resourceProxy, params)
 		} else if request.Method == DELETE {
 			code = route.DeleteHandler(params)
 		}
@@ -126,40 +151,33 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 // requests that match one of the given paths to the matching HTTP
 // method on the resource.
 func (api *API) AddResource(resource interface{}, path string) {
+
 	if api.mux == nil {
 		api.mux = http.NewServeMux()
 	}
 
-	rootEndpoint := Endpoint{Root: path}
-	nestedEndpoint := Endpoint{Root: path}
+	endpoint := Endpoint{Root: path}
 
-	if resource, ok := resource.(ListSupported); ok {
-		route := NewRetrieveRoute(path, GET, resource.List)
-		rootEndpoint.AddRoute(route)
-	}
+	listRoute := NewRoute(path, GET)
+	endpoint.AddRoute(listRoute)
 
-	if resource, ok := resource.(GetSupported); ok {
-		route := NewRetrieveRoute(fmt.Sprintf("%s/:id", path), GET, resource.Get)
-		nestedEndpoint.AddRoute(route)
-	}
+	getRoute := NewRoute(fmt.Sprintf("%s/:id", path), GET)
+	endpoint.AddRoute(getRoute)
 
-	if resource, ok := resource.(PostSupported); ok {
-		route := NewSaveRoute(fmt.Sprintf("%s/:id", path), POST, resource.Post)
-		nestedEndpoint.AddRoute(route)
-	}
+	postRoute := NewRoute(fmt.Sprintf("%s/:id", path), POST)
+	endpoint.AddRoute(postRoute)
 
 	if resource, ok := resource.(PutSupported); ok {
 		route := NewSaveRoute(fmt.Sprintf("%s/:id", path), PUT, resource.Put)
-		nestedEndpoint.AddRoute(route)
+		endpoint.AddRoute(route)
 	}
 
 	if resource, ok := resource.(DeleteSupported); ok {
 		route := NewDeleteRoute(fmt.Sprintf("%s/:id", path), DELETE, resource.Delete)
-		nestedEndpoint.AddRoute(route)
+		endpoint.AddRoute(route)
 	}
 
-	api.mux.HandleFunc(path, api.requestHandler(resource, rootEndpoint))
-	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, nestedEndpoint))
+	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, endpoint))
 }
 
 // Start causes the API to begin serving requests on the given port.

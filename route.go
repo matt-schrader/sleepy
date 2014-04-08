@@ -58,6 +58,15 @@ func NewRetrieveRoute(path string, method string, handler RestRetrieveHandler) R
 	return route
 }
 
+func NewRoute(path string, method string) Route {
+	route := Route{
+		Path:       path,
+		Method:     method,
+		PathRegexp: regexp.MustCompile(pathToRegexpString(path)),
+	}
+	return route
+}
+
 type RestSaveHandler func(interface{}, url.Values) (int, interface{})
 
 func NewSaveRoute(path string, method string, handler RestSaveHandler) Route {
