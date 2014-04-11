@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"reflect"
 )
 
@@ -15,34 +14,6 @@ const (
 	PUT    = "PUT"
 	DELETE = "DELETE"
 )
-
-type ListSupported interface {
-	List(url.Values) (int, interface{})
-}
-
-// GetSupported is the interface that provides the Get
-// method a resource must support to receive HTTP GETs.
-type GetSupported interface {
-	Get(url.Values) (int, interface{})
-}
-
-// PostSupported is the interface that provides the Post
-// method a resource must support to receive HTTP POSTs.
-type PostSupported interface {
-	Post(interface{}, url.Values) (int, interface{})
-}
-
-// PutSupported is the interface that provides the Put
-// method a resource must support to receive HTTP PUTs.
-type PutSupported interface {
-	Put(interface{}, url.Values) (int, interface{})
-}
-
-// DeleteSupported is the interface that provides the Delete
-// method a resource must support to receive HTTP DELETEs.
-type DeleteSupported interface {
-	Delete(url.Values) int
-}
 
 type Restful interface {
 	GetResource() interface{}
@@ -64,6 +35,12 @@ func NewAPI() *API {
 }
 
 func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.HandlerFunc {
+	listMethod := reflect.ValueOf(resource).MethodByName("List")
+	getMethod := reflect.ValueOf(resource).MethodByName("Get")
+	postMethod := reflect.ValueOf(resource).MethodByName("Post")
+	putMethod := reflect.ValueOf(resource).MethodByName("Put")
+	deleteMethod := reflect.ValueOf(resource).MethodByName("Delete")
+
 	return func(rw http.ResponseWriter, request *http.Request) {
 		if request.ParseForm() != nil {
 			rw.WriteHeader(http.StatusBadRequest)
@@ -88,15 +65,16 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 
 		var code int
 		var data interface{}
-		if request.Method == GET {
-			methodName := "Get"
+		if request.Method == GET && getMethod != (reflect.Value{}) {
+			var method reflect.Value
 			if len(values) == 0 {
-				methodName = "List"
+				method = listMethod
+			} else {
+				method = getMethod
 			}
-			fmt.Printf("meth: %s\n", methodName)
 			inputs := make([]reflect.Value, 1)
 			inputs[0] = reflect.ValueOf(params)
-			codeData := reflect.ValueOf(resource).MethodByName(methodName).Call(inputs)
+			codeData := method.Call(inputs)
 			r := codeData[1]
 			code = int(codeData[0].Int())
 			data = reflect.Value(r).Interface()
@@ -104,15 +82,12 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 			var resourceProxy interface{}
 			if resource, ok := resource.(Restful); ok {
 				resourceProxy = resource.GetResource()
-				fmt.Println("Resource: %v\n", resourceProxy)
-			} else {
-				fmt.Println("Not a Resource!!!!!!!!!!!!!")
 			}
-			//if resourceProxy == nil {
-			//	fmt.Printf("Route(%s) does not implement GetResource properly", route.Path)
-			//	rw.WriteHeader(http.StatusMethodNotAllowed)
-			//	return
-			//}
+			if resourceProxy == nil {
+				fmt.Printf("Route(%s) does not implement GetResource properly", route.Path)
+				rw.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
 			decoder := json.NewDecoder(request.Body)
 
 			err := decoder.Decode(&resourceProxy)
@@ -127,20 +102,34 @@ func (api *API) requestHandler(resource interface{}, endpoint Endpoint) http.Han
 				inputs := make([]reflect.Value, 2)
 				inputs[0] = reflect.ValueOf(resourceProxy)
 				inputs[1] = reflect.ValueOf(params)
-				codeData := reflect.ValueOf(resource).MethodByName("Post").Call(inputs)
+				codeData := postMethod.Call(inputs)
+				code = int(codeData[0].Int())
+				data = reflect.Value(codeData[1]).Interface()
+			} else if request.Method == POST {
+				inputs := make([]reflect.Value, 2)
+				inputs[0] = reflect.ValueOf(resourceProxy)
+				inputs[1] = reflect.ValueOf(params)
+				codeData := putMethod.Call(inputs)
 				code = int(codeData[0].Int())
 				data = reflect.Value(codeData[1]).Interface()
 			}
-			//code, data = route.SaveHandler(&resourceProxy, params)
 		} else if request.Method == DELETE {
-			code = route.DeleteHandler(params)
+			inputs := make([]reflect.Value, 1)
+			inputs[0] = reflect.ValueOf(params)
+			deleteResult := deleteMethod.Call(inputs)
+			code = int(deleteResult[0].Int())
 		}
 
-		content, err := json.Marshal(data)
-		if err != nil {
-			rw.WriteHeader(http.StatusInternalServerError)
-			return
+		var content []byte
+		var dataError error
+		if code != 404 {
+			content, dataError = json.Marshal(data)
+			if dataError != nil {
+				rw.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(code)
 		rw.Write(content)
@@ -158,26 +147,34 @@ func (api *API) AddResource(resource interface{}, path string) {
 
 	endpoint := Endpoint{Root: path}
 
-	listRoute := NewRoute(path, GET)
-	endpoint.AddRoute(listRoute)
+	if listMethod := reflect.ValueOf(resource).MethodByName("List"); listMethod != (reflect.Value{}) {
+		listRoute := NewRoute(path, GET)
+		endpoint.AddRoute(listRoute)
+	}
 
-	getRoute := NewRoute(fmt.Sprintf("%s/:id", path), GET)
-	endpoint.AddRoute(getRoute)
+	if getMethod := reflect.ValueOf(resource).MethodByName("Get"); getMethod != (reflect.Value{}) {
+		getRoute := NewRoute(fmt.Sprintf("%s/:id", path), GET)
+		endpoint.AddRoute(getRoute)
+	}
 
-	postRoute := NewRoute(fmt.Sprintf("%s/:id", path), POST)
-	endpoint.AddRoute(postRoute)
+	if postMethod := reflect.ValueOf(resource).MethodByName("Post"); postMethod != (reflect.Value{}) {
+		postRoute := NewRoute(fmt.Sprintf("%s/:id", path), POST)
+		endpoint.AddRoute(postRoute)
+	}
 
-	if resource, ok := resource.(PutSupported); ok {
-		route := NewSaveRoute(fmt.Sprintf("%s/:id", path), PUT, resource.Put)
+	if putMethod := reflect.ValueOf(resource).MethodByName("Put"); putMethod != (reflect.Value{}) {
+		route := NewRoute(fmt.Sprintf("%s/:id", path), PUT)
 		endpoint.AddRoute(route)
 	}
 
-	if resource, ok := resource.(DeleteSupported); ok {
-		route := NewDeleteRoute(fmt.Sprintf("%s/:id", path), DELETE, resource.Delete)
+	if deleteMethod := reflect.ValueOf(resource).MethodByName("Delete"); deleteMethod != (reflect.Value{}) {
+		route := NewRoute(fmt.Sprintf("%s/:id", path), DELETE)
 		endpoint.AddRoute(route)
 	}
 
-	api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, endpoint))
+	if len(endpoint.Routes) != 0 {
+		api.mux.HandleFunc(fmt.Sprintf("%s/", path), api.requestHandler(resource, endpoint))
+	}
 }
 
 // Start causes the API to begin serving requests on the given port.
